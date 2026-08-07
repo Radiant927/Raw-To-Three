@@ -1,0 +1,13 @@
+# 核心 pipeline 脚本依赖
+numpy
+opencv-python
+open3d
+scipy
+trimesh
+plyfile
+pycolmap
+Pillow
+
+# 可选：深度监督（DA3）相关脚本需要
+# torch
+# depth-anything-3

@@ -1,0 +1,26 @@
+# 大文件 / 中间产物（不传）
+*.glb
+*.obj
+runs/
+raw_pic/
+*.ply
+!examples/denoised_3dgs.ply
+
+# Python
+__pycache__/
+*.pyc
+*.log
+*.db
+
+# Node / 前端构建
+node_modules/
+.next/
+dist/
+
+# 平台运行时产物
+web/backend/jobs/
+web/backend/mock_data/
+
+# 环境变量 / 密钥
+.env
+.env.*
