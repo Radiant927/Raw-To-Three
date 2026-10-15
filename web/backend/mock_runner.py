@@ -1,13 +1,36 @@
 import asyncio
-import math
 import random
 import time
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 STEP_NAMES = ["upload", "colmap", "train", "denoise", "export"]
 STEP_SECONDS = 10  # seconds per step (demo mode; set to 30 for production)
+
+# 预置的真实模型：换演示结果只要替换 mock_data 下的这个文件，
+# 高斯点数量会在运行时从 PLY 头部读取，不需要改代码
+MOCK_PLY_NAME = "denoised_3dgs.ply"
+
+
+def read_ply_vertex_count(path: Path) -> Optional[int]:
+    """只读 PLY 头部，取出顶点（高斯点）数量。"""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4096).decode("ascii", errors="ignore")
+    except OSError:
+        return None
+
+    marker = "element vertex "
+    idx = head.find(marker)
+    if idx < 0:
+        return None
+    token = head[idx + len(marker):].split(maxsplit=1)[0]
+    try:
+        return int(token)
+    except ValueError:
+        return None
 
 
 class MockRunner:
@@ -25,9 +48,13 @@ class MockRunner:
         self.event_queue = event_queue
         self.db_path = db_path
         self._cancelled = False
-        self._num_gaussians = random.randint(80000, 250000)
-        self._psnr = round(random.uniform(25.0, 38.0), 2)
         self._training_start = None
+
+        # 用真实模型的高斯点数量，保证日志与最终产物一致
+        count = read_ply_vertex_count(mock_data_dir / MOCK_PLY_NAME) or 0
+        self._num_gaussians = count
+        # 去噪会移除 opacity 低于阈值的高斯点，这里反推出训练后的数量
+        self._pre_denoise = round(count / 0.58) if count else 0
 
     def cancel(self):
         self._cancelled = True
@@ -94,39 +121,40 @@ class MockRunner:
             ]
         elif step_name == "train":
             loss_values = [0.452, 0.321, 0.284, 0.152, 0.113, 0.087, 0.064, 0.048, 0.036, 0.029]
-            iter_values = [1000, 2000, 3000, 5000, 7000, 10000, 15000, 20000, 25000, 30000]
-            densify_1 = random.randint(50000, 300000)
-            densify_2 = random.randint(100000, 500000)
+            iter_ratios = [0.03, 0.07, 0.10, 0.17, 0.23, 0.33, 0.50, 0.67, 0.83, 1.00]
+            iter_values = [max(1, round(self.iterations * r)) for r in iter_ratios]
+            sparse_points = max(1000, self._num_gaussians // 8)
+            densify_1 = round(self._pre_denoise * 0.62)
 
             logs = [
-                ("info", "Initializing 3D Gaussian splatting..."),
-                ("info", f"Loading sparse point cloud with {self._num_gaussians} points"),
+                ("info", "Initializing 3D Gaussian Splatting training..."),
+                ("info", f"Loading sparse point cloud with {sparse_points} points"),
                 ("info", f"Starting training with {self.iterations} iterations, quality={self.quality}"),
             ]
             for it, loss in zip(iter_values, loss_values):
                 logs.append(("info", f"Training iter {it}/{self.iterations} loss={loss:.3f}"))
             logs.extend([
-                ("info", f"Densification at iter 5000: {densify_1} gaussians"),
-                ("info", f"Densification at iter 15000: {densify_2} gaussians"),
+                ("info", f"Densification at iter {iter_values[3]}: {densify_1} gaussians"),
+                ("info", f"Densification at iter {iter_values[6]}: {self._pre_denoise} gaussians"),
                 ("info", "Pruning unnecessary gaussians..."),
-                ("info", "Training complete. Final loss=0.029"),
+                ("info", f"Training complete. {self._pre_denoise} gaussians, final loss=0.029"),
             ])
             return logs
         elif step_name == "denoise":
-            removed = random.randint(10000, 50000)
+            removed = self._pre_denoise - self._num_gaussians
+            kept_pct = round(self._num_gaussians / self._pre_denoise * 100) if self._pre_denoise else 100
             return [
-                ("info", "Loading trained point cloud..."),
+                ("info", "Loading trained 3DGS point cloud..."),
                 ("info", f"Applying opacity filter (min={round(self.opacity_min, 2)})..."),
                 ("info", f"Removed {removed} low-opacity gaussians"),
-                ("info", "Cleaning isolated points..."),
-                ("info", f"Denoising complete. {self._num_gaussians} gaussians retained"),
+                ("info", "Cleaning isolated points (statistical + radius outlier removal)..."),
+                ("info", f"Denoising complete. {self._num_gaussians} gaussians retained ({kept_pct}%)"),
             ]
         elif step_name == "export":
             return [
-                ("info", "Converting to 3DGS format..."),
-                ("info", "Writing PLY file..."),
-                ("info", "Exporting GLB mesh..."),
-                ("info", "Generating thumbnail..."),
+                ("info", "Exporting 3DGS format (SuperSplat compatible)..."),
+                ("info", f"Writing {MOCK_PLY_NAME}..."),
+                ("info", f"Exported {self._num_gaussians} gaussians"),
                 ("info", "Export complete. Artifacts saved."),
             ]
         return []
@@ -213,131 +241,20 @@ class MockRunner:
         return True
 
     async def _copy_mock_artifacts(self):
+        """把预置的真实 3DGS 模型作为本任务的结果，供前端渲染与下载。"""
         result_dir = self.jobs_dir / self.job_id / "result"
         result_dir.mkdir(parents=True, exist_ok=True)
 
-        # Generate a proper INRIA V1 3DGS PLY (binary_little_endian)
-        self._generate_3dgs_ply(result_dir)
+        src = self.mock_data_dir / MOCK_PLY_NAME
+        dst = result_dir / MOCK_PLY_NAME
+        if not src.exists():
+            raise FileNotFoundError(f"预置模型不存在：{src}")
 
-        # Generate a valid minimal GLB (glTF 2.0 binary)
-        self._generate_glb(result_dir)
-
-    def _generate_glb(self, result_dir):
-        """Generate a minimal but valid GLB file that Blender can open."""
-        import struct
-
-        # A simple triangle mesh: 3 vertices, 1 face
-        vertices = [
-            -1.0, -1.0, 0.0,
-             1.0, -1.0, 0.0,
-             0.0,  1.0, 0.0,
-        ]
-        indices = [0, 1, 2]
-
-        vertex_bytes = struct.pack("<" + "f" * 9, *vertices)
-        index_bytes = struct.pack("<" + "H" * 3, *indices)
-
-        # Pad to 4-byte alignment
-        while len(vertex_bytes) % 4 != 0:
-            vertex_bytes += b"\x00"
-        bin_data = vertex_bytes + index_bytes
-
-        import json
-        json_content = json.dumps({
-            "asset": {"version": "2.0", "generator": "RT Pipeline Mock"},
-            "scene": 0,
-            "scenes": [{"nodes": [0]}],
-            "nodes": [{"mesh": 0}],
-            "meshes": [{
-                "primitives": [{
-                    "attributes": {"POSITION": 0},
-                    "indices": 1
-                }]
-            }],
-            "accessors": [
-                {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
-                 "max": [1.0, 1.0, 0.0], "min": [-1.0, -1.0, 0.0]},
-                {"bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR"}
-            ],
-            "bufferViews": [
-                {"buffer": 0, "byteOffset": 0, "byteLength": len(vertex_bytes)},
-                {"buffer": 0, "byteOffset": len(vertex_bytes), "byteLength": len(index_bytes)}
-            ],
-            "buffers": [{"byteLength": len(bin_data)}]
-        })
-
-        json_bytes = json_content.encode("utf-8")
-        while len(json_bytes) % 4 != 0:
-            json_bytes += b" "
-
-        # GLB header + chunks
-        total_len = 12 + 8 + len(json_bytes) + 8 + len(bin_data)
-        glb = struct.pack("<I", 0x46546C67)  # magic "glTF"
-        glb += struct.pack("<I", 2)           # version
-        glb += struct.pack("<I", total_len)    # total length
-
-        # JSON chunk
-        glb += struct.pack("<I", len(json_bytes))
-        glb += struct.pack("<I", 0x4E4F534A)  # "JSON"
-        glb += json_bytes
-
-        # BIN chunk
-        glb += struct.pack("<I", len(bin_data))
-        glb += struct.pack("<I", 0x004E4942)  # "BIN\0"
-        glb += bin_data
-
-        filepath = result_dir / "walls_mesh.glb"
-        filepath.write_bytes(glb)
-
-    def _generate_3dgs_ply(self, result_dir):
-        """Generate a minimal but valid 3DGS PLY that gsplat.js can render."""
-        import struct
-
-        num_gaussians = 200
-        # Arrange gaussians in a roughly spherical pattern
-        points = []
-        for i in range(num_gaussians):
-            theta = (i * 2.399963) % (2 * 3.14159)
-            phi = (i * 1.618034) % 3.14159
-            r = 2.0 + (i % 3) * 0.5
-            x = r * math.sin(phi) * math.cos(theta)
-            y = r * math.sin(phi) * math.sin(theta)
-            z = r * math.cos(phi) - 1.0
-
-            nx, ny, nz = 0.0, 0.0, 0.0
-            # Colors: mix of cyan, blue, purple
-            f_dc = [
-                0.2 + 0.3 * (i % 3 == 0),
-                0.4 + 0.3 * (i % 3 == 1),
-                0.6 + 0.3 * (i % 3 == 2),
-            ]
-            f_rest = [0.0] * 45
-            opacity = 0.5
-            scale = [-2.5, -2.5, -2.5]  # exp(-2.5) ≈ 0.08, visible size
-            rot = [1.0, 0.0, 0.0, 0.0]
-
-            points.append((x, y, z, nx, ny, nz, *f_dc, *f_rest, opacity, *scale, *rot))
-
-        # Build header
-        header = "ply\nformat binary_little_endian 1.0\n"
-        header += f"element vertex {num_gaussians}\n"
-        header += "property float x\nproperty float y\nproperty float z\n"
-        header += "property float nx\nproperty float ny\nproperty float nz\n"
-        header += "property float f_dc_0\nproperty float f_dc_1\nproperty float f_dc_2\n"
-        for k in range(45):
-            header += f"property float f_rest_{k}\n"
-        header += "property float opacity\n"
-        header += "property float scale_0\nproperty float scale_1\nproperty float scale_2\n"
-        header += "property float rot_0\nproperty float rot_1\nproperty float rot_2\nproperty float rot_3\n"
-        header += "end_header\n"
-
-        # Write PLY files
-        for filename in ["denoised_3dgs.ply", "denoised.ply"]:
-            filepath = result_dir / filename
-            with open(filepath, "wb") as f:
-                f.write(header.encode("ascii"))
-                for pt in points:
-                    f.write(struct.pack("<" + "f" * 62, *pt))
+        if dst.exists():
+            dst.unlink()
+        # 复制一份而不是硬链接：任务产物必须冻结在跑完那一刻，
+        # 否则日后替换 mock_data 里的模型，会把历史任务的结果一起改掉
+        shutil.copyfile(src, dst)
 
     async def run(self):
         """Main mock pipeline execution."""

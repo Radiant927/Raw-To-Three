@@ -35,11 +35,25 @@ app = FastAPI(title="RT Pipeline API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def no_store_api_responses(request, call_next):
+    """API 响应一律 no-store。
+
+    否则浏览器会启发式缓存 /api/jobs/{id}/result 这类响应，
+    页面可能拿到过期的产物 URL（指向已被替换的旧模型），
+    造成「预览的是旧模型、下载的是新文件」这种分叉。
+    """
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 # Wrap static mounts with CORS headers (CORSMiddleware doesn't cover static files)
 class CORSStaticFiles:
@@ -52,8 +66,10 @@ class CORSStaticFiles:
             async def cors_send(message):
                 if message["type"] == "http.response.start":
                     headers = dict(message.get("headers", []))
-                    headers[b"access-control-allow-origin"] = b"http://localhost:3000"
-                    headers[b"access-control-allow-credentials"] = b"true"
+                    headers[b"access-control-allow-origin"] = b"*"
+                    # 必须带 no-cache：否则浏览器会用启发式规则把旧响应当"新鲜"缓存、
+                    # 不回源校验，模型文件被替换后页面仍渲染旧内容（展示与下载分叉）
+                    headers[b"cache-control"] = b"no-cache"
                     message["headers"] = list(headers.items())
                 await send(message)
             await self.app(scope, receive, cors_send)
@@ -75,7 +91,7 @@ async def startup():
 
 @app.post("/api/jobs", response_model=CreateJobResponse)
 async def create_job(
-    opacity_min: float = Form(default=0.08),
+    opacity_min: float = Form(default=0.09),
     iterations: int = Form(default=30000),
     quality: str = Form(default="high"),
     photos: List[UploadFile] = File(...)

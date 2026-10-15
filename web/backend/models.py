@@ -5,7 +5,7 @@ from typing import Optional, List
 # --- Request Models ---
 
 class CreateJobRequest(BaseModel):
-    opacity_min: float = Field(default=0.08, ge=0.0, le=1.0)
+    opacity_min: float = Field(default=0.09, ge=0.0, le=1.0)
     iterations: int = Field(default=30000, ge=1000, le=100000)
     quality: str = Field(default="high")
 

@@ -1,27 +1,34 @@
-const BASE_URL = "http://localhost:8000";
+export const API_BASE =
+  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8010";
 
-// ── Type definitions (matches backend models.py) ──
+export function apiUrl(path: string): string {
+  return `${API_BASE}${path}`;
+}
+
+export function wsUrl(path: string): string {
+  return `${API_BASE.replace(/^http/, "ws")}${path}`;
+}
 
 export interface Step {
   name: string;
-  status: "pending" | "running" | "done" | "failed";
+  status: string;
   progress: number;
-  duration_sec: number | null;
+  duration_sec?: number | null;
 }
 
 export interface Job {
   job_id: string;
-  status: "queued" | "running" | "done" | "failed";
-  current_step: string | null;
-  steps: Step[];
+  status: string;
+  current_step?: string | null;
   created_at: string;
-  started_at: string | null;
-  finished_at: string | null;
-  error: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  error?: string | null;
   opacity_min: number;
   iterations: number;
   quality: string;
   num_photos: number;
+  steps: Step[];
 }
 
 export interface LogEntry {
@@ -37,11 +44,11 @@ export interface Artifact {
 }
 
 export interface ResultStats {
-  num_gaussians: number | null;
-  psnr: number | null;
-  training_time_sec: number | null;
-  total_points: number | null;
-  num_photos: number | null;
+  num_gaussians?: number | null;
+  psnr?: number | null;
+  training_time_sec?: number | null;
+  total_points?: number | null;
+  num_photos?: number | null;
 }
 
 export interface JobResult {
@@ -51,95 +58,56 @@ export interface JobResult {
   stats: ResultStats;
 }
 
-export interface GalleryItem {
-  id: string;
-  title: string;
-  thumbnail_url: string;
-  ply_url: string;
-  num_gaussians: number;
-  num_photos: number;
+export interface CreateJobParams {
+  opacityMin: number;
+  iterations: number;
+  quality: string;
+  photos: File[];
 }
 
-export interface WsMessage {
-  type: string;
-  data: Record<string, unknown>;
-}
-
-// ── API client functions ──
-
-export async function createJob(
-  formData: FormData
-): Promise<{
-  job_id: string;
-  message: string;
-}> {
-  const res = await fetch(`${BASE_URL}/api/jobs`, {
-    method: "POST",
-    body: formData,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    let msg = "创建任务失败";
-    if (typeof err.detail === "string") {
-      msg = err.detail;
-    } else if (Array.isArray(err.detail)) {
-      msg = err.detail.map((e: { msg?: string }) => e.msg || JSON.stringify(e)).join("; ");
-    } else if (err.detail) {
-      msg = JSON.stringify(err.detail);
-    }
-    throw new Error(msg);
+export async function createJob(params: CreateJobParams): Promise<string> {
+  const form = new FormData();
+  form.append("opacity_min", String(params.opacityMin));
+  form.append("iterations", String(params.iterations));
+  form.append("quality", params.quality);
+  for (const photo of params.photos) {
+    form.append("photos", photo);
   }
-  return res.json();
+
+  const res = await fetch(apiUrl("/api/jobs"), {
+    method: "POST",
+    body: form,
+  });
+
+  if (!res.ok) {
+    let detail = `创建任务失败（${res.status}）`;
+    try {
+      const data = await res.json();
+      if (data.detail) detail = data.detail;
+    } catch {
+      // ignore non-JSON error body
+    }
+    throw new Error(detail);
+  }
+
+  const data = await res.json();
+  return data.job_id as string;
 }
 
 export async function getJob(jobId: string): Promise<Job> {
-  const res = await fetch(`${BASE_URL}/api/jobs/${encodeURIComponent(jobId)}`);
+  const res = await fetch(apiUrl(`/api/jobs/${jobId}`), { cache: "no-store" });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error((err as { detail?: string }).detail ?? "获取任务失败");
+    throw new Error(`Job not found (${res.status})`);
   }
   return res.json();
 }
 
-export async function getJobLogs(
-  jobId: string,
-  since?: string
-): Promise<{ entries: LogEntry[]; cursor: string }> {
-  const params = new URLSearchParams();
-  if (since) params.set("since", since);
-  const url = `${BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/logs?${params.toString()}`;
-  const res = await fetch(url);
+export async function getResult(jobId: string): Promise<JobResult> {
+  const res = await fetch(apiUrl(`/api/jobs/${jobId}/result`), {
+    cache: "no-store",
+  });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error((err as { detail?: string }).detail ?? "获取日志失败");
+    throw new Error(`Result not found (${res.status})`);
   }
   return res.json();
-}
-
-export async function getJobResult(jobId: string): Promise<JobResult> {
-  const res = await fetch(
-    `${BASE_URL}/api/jobs/${encodeURIComponent(jobId)}/result`
-  );
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error((err as { detail?: string }).detail ?? "获取结果失败");
-  }
-  return res.json();
-}
-
-export async function getGallery(): Promise<{ items: GalleryItem[] }> {
-  const res = await fetch(`${BASE_URL}/api/gallery`);
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error((err as { detail?: string }).detail ?? "获取画廊失败");
-  }
-  return res.json();
-}
-
-export function getDownloadUrl(jobId: string, filename: string): string {
-  return `${BASE_URL}/files/${encodeURIComponent(jobId)}/${encodeURIComponent(filename)}`;
-}
-
-export function getPlyUrl(jobId: string): string {
-  return `${BASE_URL}/files/${encodeURIComponent(jobId)}/denoised_3dgs.ply`;
 }

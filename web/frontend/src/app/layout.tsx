@@ -7,33 +7,27 @@ import "./globals.css";
 const orbitron = Orbitron({
   subsets: ["latin"],
   variable: "--font-orbitron",
-  display: "swap",
 });
 
 const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
   variable: "--font-jetbrains-mono",
-  display: "swap",
 });
 
 const notoSansSC = Noto_Sans_SC({
   subsets: ["latin"],
-  weight: ["400", "500", "700"],
   variable: "--font-noto-sans-sc",
-  display: "swap",
 });
 
 export const metadata: Metadata = {
   title: "RT Pipeline | 照片到3D高斯模型重建平台",
   description:
-    "基于 COLMAP + 2D Gaussian Splatting + Open3D 的照片到3D高斯模型重建平台，上传多角度照片即可生成高质量3D模型。",
+    "基于 COLMAP + 3D Gaussian Splatting + Open3D 的照片到3D高斯模型重建平台，上传多角度照片即可生成高质量3D模型。",
 };
 
 export default function RootLayout({
   children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+}: Readonly<{ children: React.ReactNode }>) {
   return (
     <html
       lang="zh-CN"

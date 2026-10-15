@@ -1,17 +1,191 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { Loader2, AlertCircle, WifiOff } from "lucide-react";
-import ProgressStepper from "@/components/ProgressStepper";
-import LogPanel from "@/components/LogPanel";
-import type { Step, LogEntry, Job } from "@/lib/api";
-import { getJob } from "@/lib/api";
+import {
+  AlertCircle,
+  CheckCircle2,
+  Circle,
+  CircleX,
+  Loader2,
+  WifiOff,
+} from "lucide-react";
+import { getJob, wsUrl, type LogEntry, type Step } from "@/lib/api";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const STEP_LABELS: Record<string, string> = {
+  upload: "照片上传",
+  colmap: "COLMAP SfM",
+  train: "3DGS 训练",
+  denoise: "去噪",
+  export: "导出",
+};
+
+const STEP_ORDER = ["upload", "colmap", "train", "denoise", "export"];
+
+function formatDuration(sec: number): string {
+  if (sec < 60) return `${Math.round(sec)}秒`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}分${Math.round(sec % 60)}秒`;
+  return `${Math.floor(sec / 3600)}时${Math.floor((sec % 3600) / 60)}分`;
+}
+
+function StepsPanel({ steps }: { steps: Step[] }) {
+  const map = new Map(steps.map((s) => [s.name, s]));
+
+  return (
+    <div className="flex flex-col gap-0">
+      {STEP_ORDER.map((name, idx) => {
+        const step = map.get(name);
+        const status = step?.status ?? "pending";
+        const progress = step?.progress ?? 0;
+        const duration = step?.duration_sec;
+        const label = STEP_LABELS[name] ?? name;
+        const isLast = idx === STEP_ORDER.length - 1;
+
+        return (
+          <div key={name} className="relative flex gap-4">
+            {!isLast && (
+              <div className="absolute left-[17px] top-9 w-0.5 h-full bg-gray-700" />
+            )}
+            <div className="relative z-10 flex-shrink-0 mt-1.5">
+              {status === "done" && (
+                <CheckCircle2 className="w-9 h-9 text-green-400 drop-shadow-[0_0_8px_rgba(74,222,128,0.4)]" />
+              )}
+              {status === "running" && (
+                <Loader2 className="w-9 h-9 text-cyan-400 animate-spin drop-shadow-[0_0_8px_rgba(6,182,212,0.4)]" />
+              )}
+              {status === "pending" && <Circle className="w-9 h-9 text-gray-600" />}
+              {status === "failed" && (
+                <CircleX className="w-9 h-9 text-red-400 drop-shadow-[0_0_8px_rgba(248,113,113,0.4)]" />
+              )}
+            </div>
+
+            <div className={`flex-1 min-w-0 pb-8 ${isLast ? "pb-0" : ""}`}>
+              <div className="flex items-center justify-between mb-1.5">
+                <span
+                  className={`font-medium text-sm transition-colors duration-300 ${
+                    status === "running"
+                      ? "text-cyan-400"
+                      : status === "done"
+                        ? "text-green-400"
+                        : status === "failed"
+                          ? "text-red-400"
+                          : "text-gray-500"
+                  }`}
+                >
+                  {label}
+                </span>
+                {status === "done" && duration != null && (
+                  <span className="text-xs text-gray-500">
+                    {formatDuration(duration)}
+                  </span>
+                )}
+                {status === "running" && progress > 0 && (
+                  <span className="text-xs text-cyan-400">
+                    {Math.round(progress)}%
+                  </span>
+                )}
+              </div>
+              {status === "running" && (
+                <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-500 ease-out"
+                    style={{
+                      width: `${progress}%`,
+                      background:
+                        "linear-gradient(90deg, #06b6d4, #22d3ee, #67e8f9)",
+                    }}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+const LOG_DOT: Record<string, string> = {
+  info: "bg-green-500 shadow-[0_0_4px_rgba(74,222,128,0.6)]",
+  warn: "bg-yellow-400 shadow-[0_0_4px_rgba(250,204,21,0.6)]",
+  error: "bg-red-500 shadow-[0_0_4px_rgba(248,113,113,0.6)]",
+};
+
+function LogPanel({ logs }: { logs: LogEntry[] }) {
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (boxRef.current) {
+      boxRef.current.scrollTop = boxRef.current.scrollHeight;
+    }
+  }, [logs]);
+
+  return (
+    <div className="rounded-xl border border-gray-700/50 overflow-hidden bg-[#0a0d14]">
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-700/50 bg-[#0d1117]">
+        <span className="text-sm font-medium text-gray-300 font-mono">实时日志</span>
+        <div className="flex items-center gap-2">
+          <span className="relative flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+          </span>
+          <span className="text-xs text-gray-500 font-mono">LIVE</span>
+        </div>
+      </div>
+
+      <div
+        ref={boxRef}
+        className="h-64 overflow-y-auto font-mono text-sm p-4"
+        style={{ scrollbarWidth: "thin", scrollbarColor: "#1f2937 #0a0d14" }}
+      >
+        {logs.length === 0 ? (
+          <div className="flex items-center justify-center h-full text-gray-600">
+            等待日志输出...
+          </div>
+        ) : (
+          <div className="flex flex-col gap-0.5">
+            {logs.map((entry, idx) => {
+              const time = entry.timestamp
+                ? new Date(entry.timestamp).toLocaleTimeString("zh-CN", {
+                    hour12: false,
+                  })
+                : "";
+              return (
+                <div key={idx} className="flex items-start gap-2 leading-relaxed">
+                  {time && (
+                    <span className="text-gray-600 flex-shrink-0 select-none">
+                      {time}
+                    </span>
+                  )}
+                  <span className="flex-shrink-0 mt-2">
+                    <span
+                      className={`inline-block w-1.5 h-1.5 rounded-full ${
+                        LOG_DOT[entry.level] ?? LOG_DOT.info
+                      }`}
+                    />
+                  </span>
+                  <span className="text-green-400/90 break-all">{entry.line}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function formatElapsed(total: number): string {
+  const hours = Math.floor(total / 3600);
+  const mins = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours > 0) return `${hours} 小时 ${mins} 分钟`;
+  if (mins > 0) return `${mins} 分钟 ${secs} 秒`;
+  return `${secs} 秒`;
+}
 
 export default function JobProgressPage() {
-  const params = useParams() as { jobId: string };
+  const params = useParams<{ jobId: string }>();
   const router = useRouter();
   const jobId = params.jobId;
 
@@ -19,134 +193,121 @@ export default function JobProgressPage() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [status, setStatus] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
-  const [wsConnected, setWsConnected] = useState(false);
-  const [jobNotFound, setJobNotFound] = useState(false);
-  const [initialLoading, setInitialLoading] = useState(true);
+  const [connected, setConnected] = useState(false);
+  const [notFound, setNotFound] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const statusRef = useRef<string | null>(null);
+  statusRef.current = status;
 
-  // Elapsed timer
-  useEffect(() => {
-    const timer = setInterval(() => setElapsed((e) => e + 1), 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  const formatElapsed = (seconds: number): string => {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = seconds % 60;
-    if (h > 0) return `${h} 小时 ${m} 分钟`;
-    if (m > 0) return `${m} 分钟 ${s} 秒`;
-    return `${s} 秒`;
-  };
-
-  // Poll fallback
   const pollJob = useCallback(async () => {
     try {
-      const job: Job = await getJob(jobId);
+      const job = await getJob(jobId);
       setStatus(job.status);
       if (job.steps) setSteps(job.steps);
-    } catch {
-      // ignore poll errors
+    } catch (e) {
+      if (e instanceof Error && e.message.includes("404")) {
+        setNotFound(true);
+      }
     }
   }, [jobId]);
 
-  // WebSocket connection
-  const connectWs = useCallback(() => {
+  const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
+    let ws: WebSocket;
     try {
-      const ws = new WebSocket(`${API_BASE.replace("http", "ws")}/ws/jobs/${jobId}`);
+      ws = new WebSocket(wsUrl(`/ws/jobs/${jobId}`));
       wsRef.current = ws;
-
-      ws.onopen = () => {
-        setWsConnected(true);
-        setInitialLoading(false);
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          const payload = msg.data || msg;
-
-          if (msg.type === "step_update" || payload.name) {
-            const stepData = payload.step || payload;
-            setSteps((prev) => {
-              const idx = prev.findIndex((s) => s.name === stepData.name);
-              if (idx >= 0) {
-                const next = [...prev];
-                next[idx] = { ...next[idx], ...stepData };
-                return next;
-              }
-              return [...prev, stepData];
-            });
-          }
-
-          if (msg.type === "log" || payload.line) {
-            const logEntry: LogEntry = payload.log || payload;
-            setLogs((prev) => [...prev, logEntry]);
-          }
-
-          if (msg.type === "status" && payload.status === "done") {
-            setStatus("done");
-            setTimeout(() => {
-              router.push(`/result/${jobId}`);
-            }, 2000);
-          }
-
-          if (msg.type === "status") {
-            setStatus(payload.status);
-          }
-
-          if (msg.type === "error") {
-            setStatus("failed");
-          }
-        } catch {
-          // ignore parse errors
-        }
-      };
-
-      ws.onclose = () => {
-        setWsConnected(false);
-        if (status !== "done" && status !== "failed") {
-          reconnectTimeoutRef.current = setTimeout(connectWs, 5000);
-        }
-      };
-
-      ws.onerror = () => {
-        ws.close();
-      };
     } catch {
-      setInitialLoading(false);
-      reconnectTimeoutRef.current = setTimeout(connectWs, 5000);
+      reconnectTimer.current = setTimeout(connect, 5000);
+      return;
     }
-  }, [jobId, router, status]);
+
+    ws.onopen = () => {
+      setConnected(true);
+      setLoading(false);
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        const data = msg.data ?? msg;
+
+        if (msg.type === "step_update" || data.name) {
+          const payload = data.step ?? data;
+          setSteps((prev) => {
+            const idx = prev.findIndex((s) => s.name === payload.name);
+            if (idx >= 0) {
+              const next = [...prev];
+              next[idx] = { ...next[idx], ...payload };
+              return next;
+            }
+            return [...prev, payload];
+          });
+        }
+
+        if (msg.type === "log" || data.line) {
+          const payload = data.log ?? data;
+          setLogs((prev) => [...prev, payload]);
+        }
+
+        if (msg.type === "status") {
+          setStatus(data.status);
+          if (data.status === "done") {
+            setTimeout(() => router.push(`/result/${jobId}`), 2000);
+          }
+        }
+
+        if (msg.type === "error") {
+          setStatus("failed");
+        }
+      } catch {
+        // ignore malformed frame
+      }
+    };
+
+    ws.onclose = () => {
+      setConnected(false);
+      const current = statusRef.current;
+      if (current !== "done" && current !== "failed") {
+        reconnectTimer.current = setTimeout(connect, 5000);
+      }
+    };
+
+    ws.onerror = () => {
+      ws.close();
+    };
+  }, [jobId, router]);
 
   useEffect(() => {
-    connectWs();
-    pollIntervalRef.current = setInterval(pollJob, 3000);
-
+    connect();
+    pollTimer.current = setInterval(pollJob, 3000);
     return () => {
       wsRef.current?.close();
-      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      if (pollTimer.current) clearInterval(pollTimer.current);
     };
-  }, [connectWs, pollJob]);
+  }, [connect, pollJob]);
 
-  // Handle initial load timeout
   useEffect(() => {
-    const timeout = setTimeout(() => {
-      if (initialLoading) {
-        pollJob().then(() => setInitialLoading(false));
+    const ticker = setInterval(() => setElapsed((e) => e + 1), 1000);
+    return () => clearInterval(ticker);
+  }, []);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (loading) {
+        pollJob().then(() => setLoading(false));
       }
     }, 3000);
-    return () => clearTimeout(timeout);
-  }, [initialLoading, pollJob]);
+    return () => clearTimeout(timer);
+  }, [loading, pollJob]);
 
-  // Loading state
-  if (initialLoading && steps.length === 0) {
+  if (loading && steps.length === 0) {
     return (
       <div className="min-h-screen bg-[#0a0e17] flex items-center justify-center">
         <div className="flex flex-col items-center gap-4">
@@ -157,8 +318,7 @@ export default function JobProgressPage() {
     );
   }
 
-  // Job not found (we detect this from polling)
-  if (jobNotFound) {
+  if (notFound) {
     return (
       <div className="min-h-screen bg-[#0a0e17] flex items-center justify-center">
         <div className="flex flex-col items-center gap-4">
@@ -170,7 +330,6 @@ export default function JobProgressPage() {
     );
   }
 
-  // Error state
   if (status === "failed") {
     return (
       <div className="min-h-screen bg-[#0a0e17] flex items-center justify-center">
@@ -185,11 +344,10 @@ export default function JobProgressPage() {
 
   return (
     <div className="min-h-screen bg-[#0a0e17] flex flex-col">
-      {/* Header */}
       <header className="flex items-center justify-between px-6 py-4 border-b border-gray-800">
         <h1 className="text-xl font-bold text-white tracking-tight">RT Pipeline</h1>
         <div className="flex items-center gap-4">
-          {!wsConnected && (
+          {!connected && (
             <div className="flex items-center gap-1.5 text-yellow-500 text-xs">
               <WifiOff className="w-3.5 h-3.5" />
               <span>重连中...</span>
@@ -203,7 +361,6 @@ export default function JobProgressPage() {
 
       <main className="flex-1 flex items-start justify-center px-4 py-12">
         <div className="w-full max-w-2xl flex flex-col gap-8">
-          {/* Title */}
           <div>
             <h2 className="text-2xl font-bold text-white">任务进度</h2>
             <p className="mt-1 text-sm text-gray-400">
@@ -211,20 +368,19 @@ export default function JobProgressPage() {
             </p>
           </div>
 
-          {/* Done redirecting */}
           {status === "done" && (
             <div className="p-4 rounded-xl bg-green-500/10 border border-green-500/30 flex items-center gap-3">
               <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-              <p className="text-sm text-green-400">重建完成！即将跳转到结果页面...</p>
+              <p className="text-sm text-green-400">
+                重建完成！即将跳转到结果页面...
+              </p>
             </div>
           )}
 
-          {/* ProgressStepper */}
           <div className="rounded-xl border border-gray-700/50 bg-[#0d1520] p-6">
-            <ProgressStepper steps={steps} />
+            <StepsPanel steps={steps} />
           </div>
 
-          {/* LogPanel */}
           <LogPanel logs={logs} />
         </div>
       </main>
