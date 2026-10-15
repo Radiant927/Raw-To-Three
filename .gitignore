@@ -5,6 +5,7 @@ runs/
 raw_pic/
 *.ply
 !examples/denoised_3dgs.ply
+!web/backend/mock_data/denoised_3dgs.ply
 
 # Python
 __pycache__/
@@ -19,7 +20,6 @@ dist/
 
 # 平台运行时产物
 web/backend/jobs/
-web/backend/mock_data/
 
 # 环境变量 / 密钥
 .env

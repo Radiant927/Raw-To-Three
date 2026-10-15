@@ -24,12 +24,48 @@ scripts/                  核心 pipeline 脚本
   convert_to_3dgs.py      2DGS → 3DGS（Supersplat 可查看）
   export_glb.py           导出 GLB（必须 --z_min 1.0，否则泊松 blob 吞目标）
 web/                      展示平台：上传照片 → 实时进度 → 3D 结果查看 / 下载
+  start.sh / start.bat    一键启动（演示 / Mock 模式）
   frontend/               Next.js 前端（端口 3000）
-  backend/                FastAPI 后端（端口 8000，当前 Mock 模式）
+  backend/                FastAPI 后端（端口 8010）
+  backend/mock_data/      演示用占位模型
 examples/                 示例结果模型
 ```
 
 ## 快速开始
+
+### 一键启动演示（推荐）
+
+```bash
+bash web/start.sh
+```
+
+Windows 下直接双击 `web\start.bat`。
+
+脚本会自动安装前后端依赖并启动服务，然后浏览器打开 http://localhost:3000 ：
+上传 20 张以上 JPG/PNG 照片 → 实时进度 → 查看结果模型。
+演示模式用 `mock_data/` 里的占位模型，**不需要 GPU / COLMAP**，任何装了 Python 3 和 Node.js 的机器都能跑（首次安装依赖需要联网）。
+
+### 手动启动（演示 / Mock 模式）
+
+```bash
+# 后端（端口 8010）
+cd web/backend && pip install -r requirements.txt && python main.py --mock
+
+# 前端（端口 3000）
+cd web/frontend && npm install && npm run dev
+# 打开 http://localhost:3000
+```
+
+### 跑真实重建（需要 GPU 环境）
+
+展示平台的真实模式会让后端在本机执行重建脚本 `run.sh`，因此需要一台装好 COLMAP / nerfstudio 的机器（环境搭建见 `docs/setup.md`）：
+
+```bash
+export RT_PIPELINE_DIR=/path/to/huolong_run   # 该目录下需有 run.sh
+cd web/backend && python main.py               # 不带 --mock，即真实模式
+```
+
+前端同样 `npm run dev` 打开 http://localhost:3000 。真实重建依赖本机 GPU，无法在普通笔记本上克隆即跑。
 
 ### 跑一遍 pipeline（脚本级）
 
@@ -41,14 +77,6 @@ python scripts/pipeline3/patch_cameras.py --input out/colmap/sparse/0/cameras.bi
 python scripts/denoise.py --input point_cloud.ply --output denoised.ply --opacity_min 0.09
 python scripts/convert_to_3dgs.py --input denoised.ply --output denoised_3dgs.ply
 python scripts/export_glb.py --input denoised.ply --output walls_mesh.glb --z_min 1.0
-```
-
-### 启动展示平台（Mock 模式）
-
-```bash
-cd web/backend && pip install -r requirements.txt && python main.py --mock
-cd web/frontend && npm install && npm run dev
-# 浏览器打开 http://localhost:3000
 ```
 
 ## 示例
@@ -64,4 +92,4 @@ cd web/frontend && npm install && npm run dev
 ## 说明
 
 - 深度监督（DA3 深度）暂未接入：深度估计的尺度必须与 COLMAP 对齐，否则模型会炸（16 万 → 600 万高斯、拖 45 米）。尺度对齐解决后再启用。
-- 平台当前为 Mock 模式（模拟五步流程、约 50 秒出占位模型）；真 pipeline 通过 `pipeline_runner.py` 用 SSH 调服务器执行（待接入）。
+- 展示平台默认走 **Mock 模式**（用 `web/backend/mock_data/` 的占位模型，便于无 GPU 演示）；真实重建通过环境变量 `RT_PIPELINE_DIR` 指向本机含 `run.sh` 的目录，由 `web/backend/local_runner.py` 本地执行。
