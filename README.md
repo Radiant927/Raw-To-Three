@@ -1,28 +1,52 @@
 # Raw-To-Three
 
-从手机 / 无人机照片，重建建筑与小物体 3D 高斯模型（3DGS）的一站式流程。
+从手机 / 无人机拍摄的**照片或视频**，重建建筑与小物体的干净 3D 高斯（3DGS）模型。
 
 ## 流程
 
 ```
-照片 → COLMAP 位姿解算(SIMPLE_RADIAL) → 图片去畸变(k1→0, PINHOLE)
-  → 纯颜色 2DGS 训练 → 去噪(opacity<0.09) → 导出(3DGS / GLB)
+照片 / 视频(抽帧)
+  → COLMAP 位姿解算（exhaustive/sequential；注册不足 → SuperPoint+SuperGlue+hloc 兜底）
+  → splatfacto 训练（nerfstudio，dataparser: colmap）
+  → ns-export 导出 splat.ply（nerfstudio 缩放坐标）
+  → 坐标转回 COLMAP 米制
+  → 去噪：离群点去除 → 自动半径裁剪(+投影投票) → DBSCAN 保留主簇
+  → 导出标准 3DGS ply（superspl.at 查看定稿）
 ```
 
-关键点：2DGS 默认假设相机无畸变，COLMAP 解出的 k1 会被丢弃导致像素错位，
-因此训练前必须在数据端做去畸变、把相机改成 PINHOLE——这是小物体 / 近拍场景能重建成功的前提。
+关键点：
+
+- 训练用 nerfstudio 的 **splatfacto**（3DGS）。COLMAP 匹配用 `exhaustive`（全量，稳）或 `sequential`（绕圈拍，快）；SIFT 注册不足/模型被切碎时自动 fallback 到 SuperGlue + hloc。
+- 导出在 **nerfstudio 缩放坐标系**，后处理必须先按 `xyz_colmap = R.T @ (xyz_ns / scale − t)` 转回 COLMAP 米制，再做任何几何操作。
+- 去噪**默认不 mask**，见下。
+
+## 去噪决策树（核心，默认不 mask）
+
+```
+① 定位 + 切半径（第一招）
+   中心 = 小高斯密度峰（勿用 median，会被远背景带偏→主体被削）
+   半径出 2~3 档供 superspl.at 挑选
+      ├─ 效果 OK ───────────────→ 定稿
+      └─ 效果不好：先判病，别乱上 mask
+         ├─ 病1 主体被削(去太多) → 调中心 / 放宽半径（几何问题，上 mask 无用）
+         └─ 病2 背景残留(主体完整) → ② 语义 mask 投票
+② 语义 mask 投票（叠在①选好的半径基底上）
+   u2netp 显著对象分割（逐帧自校验剔坏帧）/ SAM / 用户手工 mask
+   投票阈值 = 取舍旋钮（0.25 温和 / 0.35 默认 / 0.50 更强去墙）
+✗ 反例：用单帧深度(DA3)自动生成 mask —— 环绕近围合场景帧间跳变、投票近似无效，只能当弱先验
+```
 
 ## 目录
 
 ```
 docs/                     说明文档（环境搭建 / 流程 / 拍摄指南 / 平台设计）
-scripts/                  核心 pipeline 脚本
+scripts/                  管线脚本
   run_colmap.py           COLMAP SfM（含注册率检查）
-  pipeline3/undistort_images.py   图片去畸变（保留原文件名）
+  pipeline3/undistort_images.py   图片去畸变（可选，保留原文件名）
   pipeline3/patch_cameras.py      SIMPLE_RADIAL → PINHOLE
-  denoise.py              去噪（opacity 预过滤 + 统计/半径离群去除）
-  convert_to_3dgs.py      2DGS → 3DGS（Supersplat 可查看）
-  export_glb.py           导出 GLB（必须 --z_min 1.0，否则泊松 blob 吞目标）
+  denoise.py              去噪：opacity 预过滤 + 统计/半径离群点去除
+  convert_to_3dgs.py      导出标准 3DGS ply（superspl.at 可查看）
+  export_glb.py           导出 GLB
 web/                      展示平台：上传照片 → 实时进度 → 3D 结果查看 / 下载
   start.sh / start.bat    一键启动（演示 / Mock 模式）
   frontend/               Next.js 前端（端口 3000）
@@ -58,7 +82,7 @@ cd web/frontend && npm install && npm run dev
 
 ### 跑真实重建（需要 GPU 环境）
 
-展示平台的真实模式会让后端在本机执行重建脚本 `run.sh`，因此需要一台装好 COLMAP / nerfstudio 的机器（环境搭建见 `docs/setup.md`）：
+展示平台的真实模式会让后端在本机执行重建脚本 `run.sh`（COLMAP → splatfacto → 去噪 → 导出），因此需要一台装好 COLMAP / nerfstudio 的机器（环境搭建见 `docs/setup.md`）：
 
 ```bash
 export RT_PIPELINE_DIR=/path/to/huolong_run   # 该目录下需有 run.sh
@@ -70,13 +94,22 @@ cd web/backend && python main.py               # 不带 --mock，即真实模式
 ### 跑一遍 pipeline（脚本级）
 
 ```bash
-python scripts/run_colmap.py --image_path <照片目录> --output_path out/colmap
-python scripts/pipeline3/undistort_images.py --colmap_dir out/colmap --output_dir out/undistort
-python scripts/pipeline3/patch_cameras.py --input out/colmap/sparse/0/cameras.bin --output out/train/cameras.bin --cam_updates out/undistort/cam_updates.json
-# 然后 2DGS 训练，输出 point_cloud.ply
-python scripts/denoise.py --input point_cloud.ply --output denoised.ply --opacity_min 0.09
-python scripts/convert_to_3dgs.py --input denoised.ply --output denoised_3dgs.ply
-python scripts/export_glb.py --input denoised.ply --output walls_mesh.glb --z_min 1.0
+# 1. COLMAP 位姿（注册不足会在 run.sh 里自动走 SuperGlue 兜底）
+python scripts/run_colmap.py --image_path <照片目录> --output_path out/colmap --quality high --matcher exhaustive
+
+# 2. splatfacto 训练（nerfstudio）
+ns-train splatfacto --output-dir out --experiment-name trainrun \
+  --max-num-iterations 30000 colmap --data out/ns_data
+
+# 3. 导出
+ns-export gaussian-splat --load-config out/trainrun/splatfacto/<时间戳>/config.yml --output-dir out/export
+
+# 4. 去噪
+python scripts/denoise.py --input out/export/splat.ply --output out/denoised.ply \
+  --opacity_min 0.09 --nb_neighbors 30 --std_ratio 1.5 --radius 0.05 --min_neighbors 10
+
+# 5. 导出标准 3DGS（superspl.at 可查看）
+python scripts/convert_to_3dgs.py --input out/denoised.ply --output out/denoised_3dgs.ply
 ```
 
 ## 示例
@@ -91,5 +124,6 @@ python scripts/export_glb.py --input denoised.ply --output walls_mesh.glb --z_mi
 
 ## 说明
 
-- 深度监督（DA3 深度）暂未接入：深度估计的尺度必须与 COLMAP 对齐，否则模型会炸（16 万 → 600 万高斯、拖 45 米）。尺度对齐解决后再启用。
+- 深度监督（DA3 深度）暂未接入：深度估计的尺度必须与 COLMAP 对齐，否则模型会炸（16 万 → 600 万高斯、拖 45 米）；DA3 深度也不能用来做自动 mask（见去噪决策树反例）。
 - 展示平台默认走 **Mock 模式**（用 `web/backend/mock_data/` 的占位模型，便于无 GPU 演示）；真实重建通过环境变量 `RT_PIPELINE_DIR` 指向本机含 `run.sh` 的目录，由 `web/backend/local_runner.py` 本地执行。
+- 完整的一键编排（COLMAP → SuperGlue 兜底 → 去畸变 → splatfacto → 导出 → 三步去噪）在部署用的 `run.sh` 里；本仓库 `scripts/` 提供其中的 COLMAP / 去畸变 / 去噪 / 导出步骤脚本。
