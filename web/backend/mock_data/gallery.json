@@ -1,0 +1,12 @@
+{
+  "items": [
+    {
+      "id": "library",
+      "title": "图书馆",
+      "thumbnail_url": "/mock_data/library_thumb.jpg",
+      "ply_url": "/mock_data/library_3dgs.ply",
+      "num_gaussians": 163420,
+      "num_photos": 45
+    }
+  ]
+}

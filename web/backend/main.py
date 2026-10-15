@@ -219,7 +219,7 @@ def main():
     parser = argparse.ArgumentParser(description="RT Pipeline API Server")
     parser.add_argument("--mock", action="store_true", help="Run in mock mode with MockRunner")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind")
-    parser.add_argument("--port", type=int, default=8000, help="Port to bind")
+    parser.add_argument("--port", type=int, default=8010, help="Port to bind")
     args = parser.parse_args()
 
     # Set env var so uvicorn worker processes can read it
